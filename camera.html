@@ -37,7 +37,8 @@
     <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
 
     <script type="module">
-      import { inserirCaptura, CLASSES } from './db.js';
+      // Classes reconhecidas pelo modelo (3 ratas).
+      const CLASSES = ['cinzenta', 'labradora', 'bibranca'];
 
       // ── Configuração ────────────────────────────────────────────────────────
       const LIMIAR_MOVIMENTO = 0.15; // 15% de pixels diferentes → movimento
@@ -173,20 +174,8 @@
         tensor.dispose();
         predicao.dispose();
 
-        setStatus(`Rata: ${rataNome} (${Math.round(confianca * 100)}%)`);
-
-        // Salva imagem como Blob JPEG no IndexedDB
-        canvasAtual.toBlob(
-          async (blob) => {
-            await inserirCaptura(rataNome, confianca, blob);
-            setStatus(
-              `✅ Salvo: ${rataNome} — ${Math.round(confianca * 100)}% confiança`,
-            );
-            setTimeout(() => setStatus('Monitorando...'), 2000);
-          },
-          'image/jpeg',
-          0.85,
-        );
+        setStatus(`Rata: ${rataNome} — ${Math.round(confianca * 100)}%`);
+        setTimeout(() => setStatus('Monitorando...'), 2000);
       }
 
       iniciar();
