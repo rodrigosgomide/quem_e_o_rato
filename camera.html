@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="pt-BR">
   <head>
     <meta charset="UTF-8" />
@@ -44,28 +44,47 @@
       const INTERVALO_MS = 500; // verifica a cada 500ms
       const COOLDOWN_MS = 5000; // aguarda 5s entre capturas
       const IMG_SIZE = 224;
+      // Resolução reduzida para a detecção de movimento (evita travar a thread
+      // principal processando milhões de pixels por frame).
+      const MOV_W = 96;
+      const MOV_H = 72;
 
       // ── Estado ──────────────────────────────────────────────────────────────
       let modelo = null;
       let primeiroFrame = true;
       let ultimaCaptura = 0;
+      let classificando = false; // trava de reentrada
+      let intervalo = null;
 
       const video = document.getElementById('video');
+      // Canvases pequenos e fixos só para o diff de movimento.
       const canvasAtual = document.getElementById('canvas-atual');
       const canvasAnterior = document.getElementById('canvas-anterior');
-      const ctxAtual = canvasAtual.getContext('2d', { willReadFrequently: true });
-      const ctxAnterior = canvasAnterior.getContext('2d', { willReadFrequently: true });
+      canvasAtual.width = canvasAnterior.width = MOV_W;
+      canvasAtual.height = canvasAnterior.height = MOV_H;
+      const ctxAtual = canvasAtual.getContext('2d', {
+        willReadFrequently: true,
+      });
+      const ctxAnterior = canvasAnterior.getContext('2d', {
+        willReadFrequently: true,
+      });
       const statusEl = document.getElementById('status');
 
       function setStatus(msg) {
         statusEl.textContent = msg;
       }
 
+      async function carregarModelo() {
+        setStatus('Carregando modelo...');
+        modelo = await tf.loadLayersModel('./modelo/model.json');
+        // "Aquece" o backend para que a 1ª inferência não trave a UI.
+        tf.tidy(() => modelo.predict(tf.zeros([1, IMG_SIZE, IMG_SIZE, 3])));
+      }
+
       async function iniciar() {
         // ── Carregar modelo ───────────────────────────────────────────────────
-        setStatus('Carregando modelo...');
         try {
-          modelo = await tf.loadLayersModel('./modelo/model.json');
+          await carregarModelo();
         } catch (err) {
           setStatus('Erro ao carregar o modelo: ' + err.message);
           return;
@@ -86,37 +105,26 @@
         video.srcObject = stream;
 
         video.onloadedmetadata = () => {
-          canvasAtual.width = video.videoWidth;
-          canvasAtual.height = video.videoHeight;
-          canvasAnterior.width = video.videoWidth;
-          canvasAnterior.height = video.videoHeight;
           setStatus('Monitorando...');
-          setInterval(verificarMovimento, INTERVALO_MS);
+          if (intervalo) clearInterval(intervalo);
+          intervalo = setInterval(verificarMovimento, INTERVALO_MS);
         };
       }
 
       // ── Detecção de movimento ──────────────────────────────────────────────
       function verificarMovimento() {
+        if (classificando) return; // não acumula trabalho durante inferência
+
         if (primeiroFrame) {
-          ctxAnterior.drawImage(video, 0, 0);
+          ctxAnterior.drawImage(video, 0, 0, MOV_W, MOV_H);
           primeiroFrame = false;
           return;
         }
 
-        ctxAtual.drawImage(video, 0, 0);
+        ctxAtual.drawImage(video, 0, 0, MOV_W, MOV_H);
 
-        const dadosAtual = ctxAtual.getImageData(
-          0,
-          0,
-          canvasAtual.width,
-          canvasAtual.height,
-        ).data;
-        const dadosAnterior = ctxAnterior.getImageData(
-          0,
-          0,
-          canvasAnterior.width,
-          canvasAnterior.height,
-        ).data;
+        const dadosAtual = ctxAtual.getImageData(0, 0, MOV_W, MOV_H).data;
+        const dadosAnterior = ctxAnterior.getImageData(0, 0, MOV_W, MOV_H).data;
 
         let pixelsDiferentes = 0;
         const totalPixels = dadosAtual.length / 4;
@@ -140,54 +148,56 @@
 
       // ── Inferência ──────────────────────────────────────────────────────────
       async function classificar() {
+        if (classificando) return;
+        classificando = true;
         setStatus('Movimento detectado! Classificando...');
 
-        // Cria canvas 224×224 para o modelo
-        const canvasModelo = document.createElement('canvas');
-        canvasModelo.width = canvasModelo.height = IMG_SIZE;
-        canvasModelo
-          .getContext('2d')
-          .drawImage(
-            canvasAtual,
-            0,
-            0,
-            canvasAtual.width,
-            canvasAtual.height,
-            0,
-            0,
-            IMG_SIZE,
-            IMG_SIZE,
-          );
+        try {
+          // tf.tidy libera TODOS os tensores criados aqui (entrada + saída),
+          // pois retornamos um array comum, não um tensor. Sem vazamento.
+          const probs = tf.tidy(() => {
+            const entrada = tf.browser
+              .fromPixels(video) // lê direto do vídeo
+              .toFloat()
+              .div(255)
+              .expandDims(0);
+            const redimensionada = tf.image.resizeBilinear(entrada, [
+              IMG_SIZE,
+              IMG_SIZE,
+            ]);
+            return modelo.predict(redimensionada).dataSync();
+          });
 
-        // Converte para tensor e normaliza
-        const tensor = tf.tidy(() =>
-          tf.browser.fromPixels(canvasModelo).toFloat().div(255).expandDims(0),
-        );
+          let indice = 0;
+          for (let i = 1; i < probs.length; i++) {
+            if (probs[i] > probs[indice]) indice = i;
+          }
+          const rataNome = CLASSES[indice];
+          const confianca = probs[indice];
 
-        const predicao = modelo.predict(tensor);
-        const probs = await predicao.data();
-        const indice = probs.indexOf(Math.max(...probs));
-        const rataNome = CLASSES[indice];
-        const confianca = probs[indice];
-
-        tensor.dispose();
-        predicao.dispose();
-
-        setStatus(`Rata: ${rataNome} (${Math.round(confianca * 100)}%)`);
-
-        // Salva imagem como Blob JPEG no IndexedDB
-        canvasAtual.toBlob(
-          async (blob) => {
-            await inserirCaptura(rataNome, confianca, blob);
-            setStatus(
-              `✅ Salvo: ${rataNome} — ${Math.round(confianca * 100)}% confiança`,
-            );
-            setTimeout(() => setStatus('Monitorando...'), 2000);
-          },
-          'image/jpeg',
-          0.85,
-        );
+          setStatus(`Rata: ${rataNome} — ${Math.round(confianca * 100)}%`);
+          setTimeout(() => setStatus('Monitorando...'), 2000);
+        } catch (err) {
+          console.error('Erro na classificação:', err);
+          setStatus('Erro na classificação: ' + err.message);
+          setTimeout(() => setStatus('Monitorando...'), 2000);
+        } finally {
+          classificando = false;
+        }
       }
+
+      // ── Recuperação de perda de contexto WebGL ──────────────────────────────
+      // Em celulares, pressão de memória do GPU pode derrubar o contexto WebGL;
+      // sem isso a página fica "travada" e nem o refresh recarrega o modelo.
+      window.addEventListener(
+        'webglcontextlost',
+        (e) => {
+          e.preventDefault();
+          console.warn('Contexto WebGL perdido — tentando recuperar...');
+          setStatus('Recuperando GPU...');
+        },
+        true,
+      );
 
       iniciar();
     </script>
