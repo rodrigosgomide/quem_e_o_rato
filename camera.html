@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Câmera — Ratas</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        margin: 0;
+        padding: 1rem;
+        background: #111;
+        color: #eee;
+        text-align: center;
+      }
+      video {
+        width: 100%;
+        max-width: 480px;
+        border-radius: 8px;
+      }
+      #status {
+        margin-top: 1rem;
+        font-size: 1rem;
+        min-height: 1.4rem;
+      }
+    </style>
+  </head>
+  <body>
+    <video id="video" autoplay playsinline muted></video>
+
+    <canvas id="canvas-atual" style="display: none"></canvas>
+    <canvas id="canvas-anterior" style="display: none"></canvas>
+
+    <div id="status">Iniciando câmera...</div>
+
+    <!-- TensorFlow.js — versão browser (não precisa de Node) -->
+    <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+
+    <script type="module">
+      import { inserirCaptura, CLASSES } from './db.js';
+
+      // ── Configuração ────────────────────────────────────────────────────────
+      const LIMIAR_MOVIMENTO = 0.15; // 15% de pixels diferentes → movimento
+      const INTERVALO_MS = 500; // verifica a cada 500ms
+      const COOLDOWN_MS = 5000; // aguarda 5s entre capturas
+      const IMG_SIZE = 224;
+
+      // ── Estado ──────────────────────────────────────────────────────────────
+      let modelo = null;
+      let primeiroFrame = true;
+      let ultimaCaptura = 0;
+
+      const video = document.getElementById('video');
+      const canvasAtual = document.getElementById('canvas-atual');
+      const canvasAnterior = document.getElementById('canvas-anterior');
+      const ctxAtual = canvasAtual.getContext('2d', { willReadFrequently: true });
+      const ctxAnterior = canvasAnterior.getContext('2d', { willReadFrequently: true });
+      const statusEl = document.getElementById('status');
+
+      function setStatus(msg) {
+        statusEl.textContent = msg;
+      }
+
+      async function iniciar() {
+        // ── Carregar modelo ───────────────────────────────────────────────────
+        setStatus('Carregando modelo...');
+        try {
+          modelo = await tf.loadLayersModel('./modelo/model.json');
+        } catch (err) {
+          setStatus('Erro ao carregar o modelo: ' + err.message);
+          return;
+        }
+        setStatus('Modelo carregado. Aguardando câmera...');
+
+        // ── Iniciar câmera ──────────────────────────────────────────────────────
+        let stream;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: 'environment' },
+            audio: false,
+          });
+        } catch (err) {
+          setStatus('Erro ao acessar a câmera: ' + err.message);
+          return;
+        }
+        video.srcObject = stream;
+
+        video.onloadedmetadata = () => {
+          canvasAtual.width = video.videoWidth;
+          canvasAtual.height = video.videoHeight;
+          canvasAnterior.width = video.videoWidth;
+          canvasAnterior.height = video.videoHeight;
+          setStatus('Monitorando...');
+          setInterval(verificarMovimento, INTERVALO_MS);
+        };
+      }
+
+      // ── Detecção de movimento ──────────────────────────────────────────────
+      function verificarMovimento() {
+        if (primeiroFrame) {
+          ctxAnterior.drawImage(video, 0, 0);
+          primeiroFrame = false;
+          return;
+        }
+
+        ctxAtual.drawImage(video, 0, 0);
+
+        const dadosAtual = ctxAtual.getImageData(
+          0,
+          0,
+          canvasAtual.width,
+          canvasAtual.height,
+        ).data;
+        const dadosAnterior = ctxAnterior.getImageData(
+          0,
+          0,
+          canvasAnterior.width,
+          canvasAnterior.height,
+        ).data;
+
+        let pixelsDiferentes = 0;
+        const totalPixels = dadosAtual.length / 4;
+
+        for (let i = 0; i < dadosAtual.length; i += 4) {
+          const dr = Math.abs(dadosAtual[i] - dadosAnterior[i]);
+          const dg = Math.abs(dadosAtual[i + 1] - dadosAnterior[i + 1]);
+          const db = Math.abs(dadosAtual[i + 2] - dadosAnterior[i + 2]);
+          if (dr + dg + db > 30) pixelsDiferentes++;
+        }
+
+        const pct = pixelsDiferentes / totalPixels;
+        ctxAnterior.drawImage(canvasAtual, 0, 0);
+
+        const agora = Date.now();
+        if (pct > LIMIAR_MOVIMENTO && agora - ultimaCaptura > COOLDOWN_MS) {
+          ultimaCaptura = agora;
+          classificar();
+        }
+      }
+
+      // ── Inferência ──────────────────────────────────────────────────────────
+      async function classificar() {
+        setStatus('Movimento detectado! Classificando...');
+
+        // Cria canvas 224×224 para o modelo
+        const canvasModelo = document.createElement('canvas');
+        canvasModelo.width = canvasModelo.height = IMG_SIZE;
+        canvasModelo
+          .getContext('2d')
+          .drawImage(
+            canvasAtual,
+            0,
+            0,
+            canvasAtual.width,
+            canvasAtual.height,
+            0,
+            0,
+            IMG_SIZE,
+            IMG_SIZE,
+          );
+
+        // Converte para tensor e normaliza
+        const tensor = tf.tidy(() =>
+          tf.browser.fromPixels(canvasModelo).toFloat().div(255).expandDims(0),
+        );
+
+        const predicao = modelo.predict(tensor);
+        const probs = await predicao.data();
+        const indice = probs.indexOf(Math.max(...probs));
+        const rataNome = CLASSES[indice];
+        const confianca = probs[indice];
+
+        tensor.dispose();
+        predicao.dispose();
+
+        setStatus(`Rata: ${rataNome} (${Math.round(confianca * 100)}%)`);
+
+        // Salva imagem como Blob JPEG no IndexedDB
+        canvasAtual.toBlob(
+          async (blob) => {
+            await inserirCaptura(rataNome, confianca, blob);
+            setStatus(
+              `✅ Salvo: ${rataNome} — ${Math.round(confianca * 100)}% confiança`,
+            );
+            setTimeout(() => setStatus('Monitorando...'), 2000);
+          },
+          'image/jpeg',
+          0.85,
+        );
+      }
+
+      iniciar();
+    </script>
+  </body>
+</html>

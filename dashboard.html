@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Dashboard — Ratas</title>
+    <style>
+      body {
+        font-family: sans-serif;
+        padding: 1rem;
+      }
+      #stats {
+        display: flex;
+        gap: 1rem;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+      }
+      .stat-card {
+        background: #f0f0f0;
+        padding: 1rem;
+        border-radius: 8px;
+        text-align: center;
+        flex: 1;
+        min-width: 120px;
+      }
+      #filtros {
+        display: flex;
+        gap: 0.5rem;
+        margin-bottom: 1rem;
+        flex-wrap: wrap;
+      }
+      #filtros button {
+        padding: 0.4rem 0.8rem;
+        border: 1px solid #999;
+        border-radius: 4px;
+        cursor: pointer;
+        background: #fff;
+      }
+      #filtros button.ativo {
+        background: #333;
+        color: #fff;
+        border-color: #333;
+      }
+      #grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+        gap: 1rem;
+      }
+      .card {
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        overflow: hidden;
+      }
+      .card img {
+        width: 100%;
+        aspect-ratio: 4/3;
+        object-fit: cover;
+      }
+      .card-info {
+        padding: 0.6rem;
+        font-size: 0.85rem;
+      }
+      .confianca-alta {
+        color: green;
+      }
+      .confianca-media {
+        color: orange;
+      }
+      .confianca-baixa {
+        color: red;
+      }
+      .vazio {
+        grid-column: 1/-1;
+        text-align: center;
+        color: #999;
+        padding: 2rem;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Identificador de Ratas</h1>
+
+    <div id="stats"></div>
+    <div id="filtros"></div>
+    <div id="grid"></div>
+
+    <script type="module">
+      import { listarCapturas, contarPorRata, CLASSES } from './db.js';
+
+      // Rótulos exibidos para cada classe do modelo.
+      const ROTULOS = {
+        cinzenta: 'Cinzenta',
+        labradora: 'Labradora',
+        bibranca: 'Bibranca',
+      };
+      const rotulo = (nome) => ROTULOS[nome] || nome;
+
+      const statsEl = document.getElementById('stats');
+      const filtrosEl = document.getElementById('filtros');
+      const grid = document.getElementById('grid');
+      let filtroAtivo = '';
+
+      // ── Monta cards de estatística e botões de filtro a partir das classes ───
+      function montarUI() {
+        statsEl.innerHTML = CLASSES.map(
+          (c) =>
+            `<div class="stat-card">${rotulo(c)}<br><strong id="cnt-${c}">—</strong></div>`,
+        ).join('');
+
+        const botoes = [
+          '<button class="ativo" data-filtro="">Todas</button>',
+          ...CLASSES.map(
+            (c) => `<button data-filtro="${c}">${rotulo(c)}</button>`,
+          ),
+        ];
+        filtrosEl.innerHTML = botoes.join('');
+
+        filtrosEl.querySelectorAll('button').forEach((btn) => {
+          btn.addEventListener('click', () => {
+            filtrosEl
+              .querySelectorAll('button')
+              .forEach((b) => b.classList.remove('ativo'));
+            btn.classList.add('ativo');
+            filtroAtivo = btn.dataset.filtro;
+            renderizar();
+          });
+        });
+      }
+
+      // ── Estatísticas ─────────────────────────────────────────────────────────
+      async function atualizarStats() {
+        const contagem = await contarPorRata();
+        CLASSES.forEach((r) => {
+          document.getElementById(`cnt-${r}`).textContent =
+            `${contagem[r] || 0} vis.`;
+        });
+      }
+
+      // ── Renderização dos cards ────────────────────────────────────────────────
+      function classeConfianca(v) {
+        if (v >= 0.85) return 'confianca-alta';
+        if (v >= 0.65) return 'confianca-media';
+        return 'confianca-baixa';
+      }
+
+      function formatarData(iso) {
+        return new Date(iso).toLocaleString('pt-BR');
+      }
+
+      function criarCard(captura) {
+        const url = URL.createObjectURL(captura.imagem); // Blob → URL temporária
+        const pct = Math.round(captura.confianca * 100);
+        const cls = classeConfianca(captura.confianca);
+
+        const div = document.createElement('div');
+        div.className = 'card';
+        div.innerHTML = `
+          <img src="${url}" alt="${rotulo(captura.rata_nome)}">
+          <div class="card-info">
+            <strong>${rotulo(captura.rata_nome)}</strong><br>
+            ${formatarData(captura.criado_em)}<br>
+            <span class="${cls}">Confiança: ${pct}%</span>
+          </div>
+        `;
+        return div;
+      }
+
+      async function renderizar() {
+        const capturas = await listarCapturas(filtroAtivo || null);
+        grid.innerHTML = '';
+
+        if (capturas.length === 0) {
+          grid.innerHTML = '<p class="vazio">Nenhuma captura encontrada.</p>';
+          return;
+        }
+
+        capturas.forEach((c) => grid.appendChild(criarCard(c)));
+      }
+
+      // ── Inicialização e polling ──────────────────────────────────────────────
+      montarUI();
+      atualizarStats();
+      renderizar();
+      setInterval(() => {
+        atualizarStats();
+        renderizar();
+      }, 30000);
+    </script>
+  </body>
+</html>
